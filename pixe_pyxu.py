@@ -65,15 +65,17 @@ if __name__ == "__main__":
     # dataset, dws = "000-HR", 2  # folder, down-sampling rate
     dataset, dws = "bin2", 2
     rx_pitch = (127e-3, 127e-3)  # 0.127 [mm] detector/receiver pitch (height, width)
-
+    
     # Load setup parameters from disk. ========================================
     froot = plib.Path("~/Downloads/M2EA99-000").expanduser()
     fpath = froot / dataset
     sod, sdd, v_shape, v_pitch, P = get_info(fpath)
+    #flip image of each view
     
     # ROI
     #roi = 5
     #P = P[:, P.shape[1]//2 - roi: P.shape[1]//2 + roi, :]
+
     P = P[:, P.shape[1]//2, :]
     N_view, N_w = P.shape
     N_h = 1
@@ -81,29 +83,35 @@ if __name__ == "__main__":
     # Compute TX position (1 projection). =====================================
     rx_h = rx_pitch[0] * dws * N_h  # detector height [mm]
     rx_w = rx_pitch[1] * dws * N_w  # detector width  [mm]
-    tx_pos = np.r_[0, rx_h / 2, sod]  # (3,)
+    
+    shift_cor = -0.3
+    tx_pos = np.r_[shift_cor, rx_h / 2, sod ]  # (3,)
 
     # Compute RX position (1 projection). =====================================
-    rx_ll = np.r_[-rx_w / 2, 0, sod - sdd]  # detector lower-left corner
+    rx_ll = np.r_[-rx_w / 2 + shift_cor, 0, sod - sdd ]  # detector lower-left corner
+    
     Y, X, Z = np.meshgrid(
         (0.5 * rx_pitch[0] * dws) + np.arange(N_h) * (rx_pitch[0] * dws),  # height (Y-axis)
         (0.5 * rx_pitch[1] * dws) + np.arange(N_w) * (rx_pitch[1] * dws),  # width  (X-axis)
         np.r_[0],  # depth (Z-axis)
         indexing="ij",
     )
+    
     rx_pos = rx_ll + np.concatenate([X, Y, Z], axis=-1)  # (N_h, N_w, 3)
-
     # Compute VOL position. ===================================================
-    v_dim = np.r_[v_shape] * np.r_[v_pitch]  # volume XYZ dimensions [mm]
-    v_center = np.r_[0, rx_h / 2, 0]  # volume center
-    v_ll = v_center - v_dim / 2  # volume lower-left corner.
+    v_dim = np.r_[v_shape] * np.r_[v_pitch]  # volume XYZ dimensions [mm]      
+    v_center = np.r_[0, rx_h / 2, 0]  # volume center                          
+    v_ll = v_center - v_dim / 2  # volume lower-left corner.                   
 
     # Compute ray parameterizations (1 projection). ===========================
-    n_spec = np.reshape(rx_pos - tx_pos, (-1, 3))  # (N_h * N_w, 3)
-    t_spec = np.broadcast_to(tx_pos, n_spec.shape)  # (N_h * N_w, 3)
+    n_spec = np.reshape(rx_pos - tx_pos, (-1, 3))  # (N_h * N_w, 3)       
+    t_spec = np.broadcast_to(tx_pos, n_spec.shape)  # (N_h * N_w, 3)           
+    #t_spec = np.reshape(rx_pos, (-1,3)) # (N_h * N_w, 3)           
+
+
 
     # Expand n/t_spec to include all rotations. ===============================
-    angle = np.linspace(0, 2 * np.pi, num=N_view, endpoint=False)
+    angle = -np.linspace(0, 2 * np.pi, num=N_view, endpoint=False) #+ np.pi
     R = np.zeros(
         (N_view, 3, 3),
     )
@@ -113,6 +121,7 @@ if __name__ == "__main__":
     R[:, 0, 2] = -np.sin(angle)
     R[:, 1, 1] = 1
 
+    #shift t_spec third dimension to correction center of rotation
     n_spec = (n_spec @ R.transpose(0, 2, 1)).reshape(-1, 3)  # (N_view * N_h * N_w, 3)
     t_spec = (t_spec @ R.transpose(0, 2, 1)).reshape(-1, 3)  # (N_view * N_h * N_w, 3)
     
@@ -150,12 +159,13 @@ if __name__ == "__main__":
 
         t_start = time.time()
         #V_bw = op.adjoint(P.reshape(-1))
-        stop_crit = pxst.MaxIter(5)
-        V_bw = op.pinv(P.reshape(-1), damp=0.01, kwargs_fit=dict(stop_crit=stop_crit))
+        stop_crit = pxst.MaxIter(80)
+        V_bw = op.pinv(P.reshape(-1), damp=8, kwargs_fit=dict(stop_crit=stop_crit))
         t_stop = time.time()
         print("backward: ", t_stop - t_start)
+
         plt.figure()
-        plt.imshow(V_bw.reshape(v_shape)[100:500, v_shape[1]//2, 100:500], cmap='gray')
+        plt.imshow(V_bw.reshape(v_shape)[:, v_shape[1]//2, :], cmap='gray')
         plt.show()          
 
         breakpoint()
