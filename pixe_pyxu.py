@@ -193,6 +193,7 @@ def reconstruct(fpath, dataset, dws, rx_pitch, method = 'pinv', roi='False', shi
 
     sod, sdd, v_shape, v_pitch, P = get_info(fpath)
     op, P, v_shape = setOperator(sod, sdd, v_shape, v_pitch, P, rx_pitch, dws, roi, shift_cor, center_slice)
+    
     W = pxrt.Width.SINGLE
     with pxrt.Precision(W):
         t_start = time.time()
@@ -230,7 +231,7 @@ def reconstruct(fpath, dataset, dws, rx_pitch, method = 'pinv', roi='False', shi
         
         return V_bw.reshape(v_shape)
 
-def shift_correction(fpath, dataset, dws, rx_pitch, range, step):
+def shift_correction(fpath, dataset, dws, rx_pitch, range_mm, step, metric = 'variance'):
     '''
     Parameters
     ----------
@@ -246,6 +247,9 @@ def shift_correction(fpath, dataset, dws, rx_pitch, range, step):
         Range of shift correction values.
     step: float
         Step size of shift correction values.
+    metric: str
+        Metric to choose shift correction value : 'variance', 'fft'.
+
     Returns
     -------
     shift_corr: float
@@ -253,18 +257,35 @@ def shift_correction(fpath, dataset, dws, rx_pitch, range, step):
     '''
 
     #find correct shift correction with plotting curve of sharpness if reconstructions for different shift corrections
-    shift_corr = np.arange(-range[0], range[1], step)
+    shift_corr = np.arange(range_mm[0], range_mm[1], step)
     sharpness = np.zeros(shift_corr.shape)
-    for i in range(len(shift_corr)):
-        #sharpness in fourier space : mask to keep only high frequencies and then sum absolute values
-        rec = reconstruct(fpath, dataset, dws, rx_pitch, method = 'pinv', roi='False', shift_cor=shift_corr[i], center_slice='True', max_iter=4, damp=0.05)
-        rec = rec[:, rec.shape[1]//2, :]
-        fourier_image = np.fft.fftshift(np.fft.fft2(rec))
-        fourier_image = np.abs(fourier_image)
-        mask = np.ones(fourier_image.shape)
-        x, y = np.ogrid[:fourier_image.shape[0], :fourier_image.shape[1]]
-        mask = np.sqrt((x - fourier_image.shape[0]//2)**2 + (y - fourier_image.shape[1]//2)**2) <= 150
-        sharpness[i] = np.sum(fourier_image*mask)
+
+    if metric == 'fft':
+        print('Center of rotation correction with method: ', metric)
+        for i in range(len(shift_corr)):
+            #sharpness in fourier space : mask to keep only high frequencies and then sum absolute values
+            rec = reconstruct(fpath, dataset, dws, rx_pitch, method = 'pinv', roi='False', shift_cor=shift_corr[i], center_slice='True', max_iter=4, damp=0.05)
+            rec = rec[:, rec.shape[1]//2, :]
+            fourier_image = np.fft.fftshift(np.fft.fft2(rec))
+            fourier_image = np.abs(fourier_image)
+            mask = np.ones(fourier_image.shape)
+            x, y = np.ogrid[:fourier_image.shape[0], :fourier_image.shape[1]]
+            mask = np.sqrt((x - fourier_image.shape[0]//2)**2 + (y - fourier_image.shape[1]//2)**2) <= 150
+            sharpness[i] = np.sum(fourier_image*mask)
+    elif metric == 'variance':
+        print('Center of rotation correction with method: ', metric)
+        for i in range(len(shift_corr)):
+            print(i)
+            #sharpness in image space : variance of image
+            rec = reconstruct(fpath, dataset, dws, rx_pitch, method = 'pinv', roi='False', shift_cor=shift_corr[i], center_slice='True', max_iter=4, damp=0.05)
+            rec = rec[:, rec.shape[1]//2, :]
+            sharpness[i] = np.var(rec)
+
+    plt.figure()
+    plt.plot(shift_corr, sharpness)
+    plt.xlabel('shift correction value')
+    plt.ylabel('sharpness')
+    plt.show()
 
     return shift_corr[np.argmax(sharpness)]
 
@@ -279,15 +300,15 @@ if __name__ == "__main__":
     # dataset, dws = "000-HR", 2  # folder, down-sampling rate
     dataset, dws = "bin2", 2
     rx_pitch = (127e-3, 127e-3)  # 0.127 [mm] detector/receiver pitch (height, width)
-    
+
     # Load setup parameters from disk. ========================================
     froot = plib.Path("~/Downloads/M2EA99-000").expanduser()
     fpath = froot / dataset
 
     shiftcorr_value = -0.293 #precalculated shift correction value
-    #shift_correction(fpath, dataset, dws, rx_pitch, range=[-0.5, 0.1], step=0.01) #comment/uncomment to calculate shift correction value
+    #shiftcorr_value = shift_correction(fpath, dataset, dws, rx_pitch, range_mm=[-0.5, 0.1], step=0.01, metric = 'variance') #comment/uncomment to calculate shift correction value
     print('shift correction value: ', shiftcorr_value)
-    rec = reconstruct(fpath, dataset, dws, rx_pitch, method = 'pinv', roi='False', shift_cor=shiftcorr_value, center_slice='True', max_iter=100, damp=0.5)
+    rec = reconstruct(fpath, dataset, dws, rx_pitch, method = 'pinv', roi='False', shift_cor=shiftcorr_value, center_slice='True', max_iter=100, damp=3)
     
     plt.figure()
     plt.imshow(rec[100:500, rec.shape[1]//2, 100:500], cmap='gray', vmax=0.1, vmin=0)
