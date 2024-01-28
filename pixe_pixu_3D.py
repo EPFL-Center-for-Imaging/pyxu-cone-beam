@@ -1,7 +1,7 @@
 import pathlib as plib
 import time
 import xml.etree.ElementTree as ET
-import cupy as cp
+import numpy as cp
 import matplotlib.pyplot as plt
 #import numpy as np
 import tifffile as tf
@@ -10,8 +10,10 @@ import pyxu.experimental.xray as pxr
 import pyxu.runtime as pxrt
 import pyxu.opt.stop as pxst
 
-from pyxu.operator import Gradient, SquaredL2Norm, L1Norm, PositiveL1Norm
-from pyxu.opt.solver import PGD, PD3O
+from pyxu.operator import Gradient, SquaredL2Norm, L1Norm, PositiveL1Norm, L21Norm
+from pyxu.opt.solver import PGD, CV
+from pyxu.abc import ProxFunc
+
 
 
 def get_info(path: plib.Path):
@@ -202,56 +204,81 @@ def reconstruct(fpath, dataset, dws, rx_pitch, method = 'pinv', roi='False', shi
         elif method == 'tv':
             stop_crit = pxst.MaxIter(max_iter)
             x0= cp.zeros(v_shape).ravel()
-            grad = Gradient(arg_shape=v_shape, sample = v_pitch, gpu=True)
-            lambda_= damp
-            huber_norm = L1Norm(grad.shape[0]).moreau_envelope(0.01)  # We smooth the L1 norm to facilitate optimisation
-            tv_prior = lambda_ * huber_norm * grad
 
-            # Loss
+            class TVFunc(ProxFunc):
+                r"""
+                TODO
+                """
+
+                def __init__(self,
+                            arg_shape,
+                            isotropic: bool = True,
+                            finite_diff_kwargs: dict = dict(),
+                            prox_init_kwargs: dict = dict(show_progress=False),
+                            prox_fit_kwargs: dict = dict(),
+                            ):
+                    r"""
+                    Parameters
+                    ----------
+                    arg_shape: pyct.NDArrayShape
+                        Shape of the input array.
+                    isotropic: bool
+                        Isotropic or anisotropic TV (Default: isotropic).
+                    """
+                    
+                    N_dim = len(arg_shape)
+
+                    super().__init__(shape=(1, arg_shape[0]*arg_shape[1]*arg_shape[2]))
+                    
+                    self._lipschitz = cp.inf 
+                    self._arg_shape = arg_shape
+                    
+                    finite_diff_op = Gradient(arg_shape, sampling=[1, 1, 1]) #GPU=True if gpu is available /!\
+                    
+                    #finite_diff_op.estimate_lipschitz()
+                    finite_diff_op.lipschitz= 3
+                    self._finite_diff_op = finite_diff_op
+                    
+                    if isotropic:
+                        self._norm = L21Norm(arg_shape=(N_dim, *arg_shape))
+                    
+                    #self._norm = L1Norm(dim=finite_diff_op.codim)
+                    self._prox_init_kwargs = prox_init_kwargs
+                    self._prox_fit_kwargs = prox_fit_kwargs
+
+                def apply(self, arr):
+                    return cp.array(self._norm(self._finite_diff_op(cp.array(arr))))
+
+                def prox(self, arr, tau = 0.05):
+                    ls = 1 / 2 * SquaredL2Norm(dim=arr.size).argshift(-cp.array(arr))
+                    #ls.estimate_diff_lipschitz()
+                    ls.diff_lipschitz = 1.0
+                    slv = CV(f=ls, h=tau * self._norm, K=self._finite_diff_op, verbosity = 5)
+                    slv.fit(x0=cp.array(arr.copy()), stop_crit = pxst.RelError(eps=1e-4, var="x", f=None, norm=2, satisfy_all=True) | pxst.MaxIter(30))
+                    return cp.array(slv.solution().reshape(arr.shape))
+                
+            lambda_= damp
+            tv_prior = TVFunc(arg_shape=v_shape)
+            # Loss, smooth part of the posterior
             sigma = 1
             loss = (1/ (2 * sigma**2)) * SquaredL2Norm(dim=P.size).asloss(P.ravel()) * op
-            
-            # Smooth part of the posterior
-            smooth_posterior = loss + tv_prior
-            smooth_posterior.diff_lipschitz = 1e5 #smooth_posterior.estimate_diff_lipschitz()
+            smooth_posterior = loss
+            #Convergence of the algorithm is not guaranteed if the Lipschitz constant is not known
+            smooth_posterior.diff_lipschitz = 1e3 #smooth_posterior.estimate_diff_lipschitz() ??
             
             # Define the solver
-            solver = PGD(f=smooth_posterior, show_progress=True, verbosity=1)
+            solver = PGD(f=smooth_posterior, g = lambda_ * tv_prior, show_progress=True, verbosity=1)
             
             # Call fit to trigger the solver
             stop_crit = pxst.RelError(eps=1e-3, var="x", f=None, norm=2, satisfy_all=True) | pxst.MaxIter(max_iter)
+
+            # Launch the solver
             solver.fit(x0=x0, acceleration=True, stop_crit=stop_crit)
-            recon_tv = solver.solution().squeeze()
-            V_bw = recon_tv.reshape(v_shape)
-
-        elif method == 'tvl21':
-            stop_crit = pxst.MaxIter(max_iter)
-            x0= cp.zeros(v_shape).ravel()
-            grad = Gradient(arg_shape=v_shape, sample = v_pitch)
-            lambda_= damp
-            huber_norm = L1Norm(grad.shape[0]).moreau_envelope(0.01)  # We smooth the L1 norm to facilitate optimisation
-            tv_prior = lambda_ * huber_norm * grad
-
-            # Loss
-            sigma = 1
-            loss = (1/ (2 * sigma**2)) * SquaredL2Norm(dim=P.size).asloss(P.ravel()) * op
-
-            # Smooth part of the posterior
-            smooth_posterior = loss + tv_prior
-            smooth_posterior.diff_lipschitz = 5e5 #smooth_posterior.estimate_diff_lipschitz()
-
-            # Define the solver
-
-            # Call fit to trigger the solver
-            stop_crit = pxst.RelError(eps=1e-3, var="x", f=None, norm=2, satisfy_all=True) | pxst.MaxIter(max_iter)
-            solver = PD3O(f=loss, h= 3e-2 * l21, K=grad, verbosity=1)
-            solver.fit(x0=x0.ravel(), stop_crit=stop_crit)
 
             recon_tv = solver.solution().squeeze()
             V_bw = recon_tv.reshape(v_shape)
 
         t_stop = time.time()
-        #print("backward: ", t_stop - t_start)
         
         return V_bw.reshape(v_shape)
 
@@ -296,15 +323,16 @@ def shift_correction(fpath, dataset, dws, rx_pitch, range_mm, step, metric = 'va
             x, y = cp.ogrid[:fourier_image.shape[0], :fourier_image.shape[1]]
             mask = cp.sqrt((x - fourier_image.shape[0]//2)**2 + (y - fourier_image.shape[1]//2)**2) <= 150
             sharpness[i] = cp.sum(fourier_image*mask)
+
     elif metric == 'variance':
         print('Center of rotation correction with method: ', metric)
         for i in range(len(shift_corr)):
-            print(i)
             #sharpness in image space : variance of image
             rec = reconstruct(fpath, dataset, dws, rx_pitch, method = 'pinv', roi='False', shift_cor=shift_corr[i], center_slice='True', max_iter=4, damp=0.05)
             rec = rec[:, rec.shape[1]//2, :]
             sharpness[i] = cp.var(rec)
 
+    #plot sharpness curve
     plt.figure()
     plt.plot(shift_corr, sharpness)
     plt.xlabel('shift correction value')
@@ -326,23 +354,23 @@ if __name__ == "__main__":
     rx_pitch = (127e-3, 127e-3)  # 0.127 [mm] detector/receiver pitch (height, width)
 
     # Load setup parameters from disk. ========================================
-    froot = plib.Path("~/HOST/pixe/M2EA99-000").expanduser()
+    froot = plib.Path("~/Downloads/M2EA99-000").expanduser()
     fpath = froot / dataset
 
-    shiftcorr_value = -0.293 #precalculated shift correction value
+    shiftcorr_value = -0.293 #precalculated shift correction value, below is code to calculate it
     #shiftcorr_value = shift_correction(fpath, dataset, dws, rx_pitch, range_mm=[-0.5, 0.1], step=0.01, metric = 'variance') #comment/uncomment to calculate shift correction value
     print('shift correction value: ', shiftcorr_value)
-    rec = reconstruct(fpath, dataset, dws, rx_pitch, method = 'pinv', roi=70, shift_cor=shiftcorr_value, center_slice='False', max_iter=30, damp=70)
+
+    # Reconstruct. ============================================================
+    rec = reconstruct(fpath, dataset, dws, rx_pitch, method = 'tv', roi=70, shift_cor=shiftcorr_value, center_slice='True', max_iter=120, damp=0.009)
     
+    # Plot. ===================================================================
+    plt.figure()
+    plt.imshow(rec[100:500, rec.shape[1]//2, 100:500], cmap='gray', vmax=0.07, vmin=0.0015) #vmax=0.1)
+    plt.show()
+
     cp.save('recon_pixe_hor', rec[100:500, rec.shape[1]//2, 100:500])
     cp.save('recon_pixe_vert', rec[100:500, :, rec.shape[2]//2])
     cp.save('recon_pixe_sag', rec[rec.shape[0]//2, :, :])
-
-    breakpoint()
-
-    plt.figure()
-    plt.imshow(rec[100:500, rec.shape[1]//2, 100:500], cmap='gray', vmax=0.1, vmin=0)
-    plt.show()   
-
 
     breakpoint()
