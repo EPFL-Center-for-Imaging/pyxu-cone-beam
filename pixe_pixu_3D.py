@@ -1,7 +1,7 @@
 import pathlib as plib
 import time
 import xml.etree.ElementTree as ET
-import numpy as cp
+import cupy as cp
 import matplotlib.pyplot as plt
 #import numpy as np
 import tifffile as tf
@@ -233,7 +233,7 @@ def reconstruct(fpath, dataset, dws, rx_pitch, method = 'pinv', roi='False', shi
                     self._lipschitz = cp.inf 
                     self._arg_shape = arg_shape
                     
-                    finite_diff_op = Gradient(arg_shape, sampling=[1, 1, 1]) #GPU=True if gpu is available /!\
+                    finite_diff_op = Gradient(arg_shape, sampling=[1, 1, 1], gpu=True) #GPU=True if gpu is available /!\
                     
                     #finite_diff_op.estimate_lipschitz()
                     finite_diff_op.lipschitz= 3
